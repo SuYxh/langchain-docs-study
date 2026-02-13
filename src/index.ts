@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { createAgent, tool } from "langchain";
+import { ChatOpenAI } from "@langchain/openai";
 import * as z from "zod";
 
 const getWeather = tool(
@@ -13,8 +14,15 @@ const getWeather = tool(
   }
 );
 
+const model = new ChatOpenAI({
+  model: "deepseek/deepseek-v3.2-251201",
+  configuration: {
+    baseURL: process.env.OPENAI_BASE_URL,
+  },
+});
+
 const agent = createAgent({
-  model: "gpt-4.1",
+  model: model,
   tools: [getWeather],
 });
 
