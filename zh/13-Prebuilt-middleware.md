@@ -1,0 +1,1293 @@
+## 文档索引
+在以下位置获取完整的文档索引：https://docs.langchain.com/llms.txt
+使用此文件在进一步探索之前发现所有可用页面。
+
+# 预置中间件
+
+> 常见智能体用例的预置中间件
+
+LangChain 和 [Deep Agents](/oss/javascript/deepagents/overview) 为常见用例提供了预置中间件。每个中间件都是生产就绪的，并且可以根据您的特定需求进行配置。
+
+## 供应商无关中间件
+
+以下中间件适用于任何 LLM 提供商：
+
+| 中间件 | 描述 |
+| ------------------------------------------- | ---------------------------------------------------------------------------- |
+| [Summarization](#summarization) | 当接近令牌限制时自动总结对话历史记录。 |
+| [Human-in-the-loop](#human-in-the-loop) | 暂停执行以供人工批准工具调用。 |
+| [Model call limit](#model-call-limit) | 限制模型调用次数以防止成本过高。 |
+| [Tool call limit](#tool-call-limit) | 通过限制调用次数来控制工具执行。 |
+| [Model fallback](#model-fallback) | 当主模型失败时自动回退到替代模型。 |
+| [PII detection](#pii-detection) | 检测并处理个人身份信息 (PII)。 |
+| [To-do list](#to-do-list) | 为智能体配备任务规划和跟踪能力。 |
+| [LLM tool selector](#llm-tool-selector) | 在调用主模型之前使用 LLM 选择相关工具。 |
+| [Tool retry](#tool-retry) | 自动重试失败的工具调用，并带有指数退避。 |
+| [Model retry](#model-retry) | 自动重试失败的模型调用，并带有指数退避。 |
+| [LLM tool emulator](#llm-tool-emulator) | 为了测试目的，使用 LLM 模拟工具执行。 |
+| [Context editing](#context-editing) | 通过修剪或清除工具使用来管理对话上下文。 |
+| [Filesystem](#filesystem-deepagents) | 为智能体提供用于存储上下文和长期记忆的文件系统。 |
+| [Subagent middleware](#subagent-deepagents) | 添加生成子智能体的能力。 |
+
+### 总结 (Summarization)
+
+当接近令牌限制时自动总结对话历史记录，保留最近的消息同时压缩旧的上下文。总结对于以下情况很有用：
+
+* 超过上下文窗口的长时间运行的对话。
+* 具有大量历史记录的多轮对话。
+* 保留完整对话上下文很重要的应用程序。
+
+```typescript  theme={null}
+import { createAgent, summarizationMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [weatherTool, calculatorTool],
+  middleware: [
+    summarizationMiddleware({
+      model: "gpt-4.1-mini",
+      trigger: { tokens: 4000 },
+      keep: { messages: 20 },
+    }),
+  ],
+});
+```
+
+<Accordion title="Configuration options">
+  <Tip>
+    如果使用 `langchain@1.1.0`，`trigger` 和 `keep` 的 `fraction` 条件（如下所示）依赖于聊天模型的 [配置文件数据](/oss/javascript/langchain/models#model-profiles)。如果数据不可用，请使用其他条件或手动指定：
+
+    ```typescript  theme={null}
+    const customProfile: ModelProfile = {
+        maxInputTokens: 100_000,
+        // ...
+    }
+    model = await initChatModel("...", {
+        profile: customProfile,
+    });
+    ```
+  </Tip>
+
+  <ParamField body="model" type="string | BaseChatModel" required>
+    用于生成摘要的模型。可以是模型标识符字符串（例如 `'openai:gpt-4.1-mini'`）或 `BaseChatModel` 实例。
+  </ParamField>
+
+  <ParamField body="trigger" type="object | object[]">
+    触发总结的条件。可以是：
+
+    * 单个条件对象（所有属性必须满足 - AND 逻辑）
+    * 条件对象数组（任何条件必须满足 - OR 逻辑）
+
+    每个条件可以包括：
+
+    * `fraction` (number): 模型上下文大小的分数 (0-1)
+    * `tokens` (number): 绝对令牌数
+    * `messages` (number): 消息计数
+
+    每个条件必须至少指定一个属性。如果未提供，总结将不会自动触发。
+  </ParamField>
+
+  <ParamField body="keep" type="object" default="{messages: 20}">
+    总结后要保留多少上下文。准确指定以下之一：
+
+    * `fraction` (number): 要保留的模型上下文大小的分数 (0-1)
+    * `tokens` (number): 要保留的绝对令牌数
+    * `messages` (number): 要保留的最近消息数
+  </ParamField>
+
+  <ParamField body="tokenCounter" type="function">
+    自定义令牌计数函数。默认为基于字符的计数。
+  </ParamField>
+
+  <ParamField body="summaryPrompt" type="string">
+    总结的自定义提示模板。如果未指定，则使用内置模板。模板应包含 `{messages}` 占位符，对话历史记录将插入其中。
+  </ParamField>
+
+  <ParamField body="trimTokensToSummarize" type="number" default="4000">
+    生成摘要时要包含的最大令牌数。在总结之前，消息将被修剪以适应此限制。
+  </ParamField>
+
+  <ParamField body="summaryPrefix" type="string">
+    要添加到摘要消息的前缀。如果未提供，则使用默认前缀。
+  </ParamField>
+
+  <ParamField body="maxTokensBeforeSummary" type="number" deprecated>
+    **已弃用:** 请改用 `trigger: { tokens: value }`。触发总结的令牌阈值。
+  </ParamField>
+
+  <ParamField body="messagesToKeep" type="number" deprecated>
+    **已弃用:** 请改用 `keep: { messages: value }`。要保留的最近消息。
+  </ParamField>
+</Accordion>
+
+<Accordion title="Full example">
+  总结中间件监控消息令牌计数，并在达到阈值时自动总结较旧的消息。
+
+  **触发条件** 控制总结何时运行：
+
+  * 单个条件对象（指定的必须满足）
+  * 条件数组（任何条件必须满足 - OR 逻辑）
+  * 每个条件可以使用 `fraction`（模型上下文大小的）、`tokens`（绝对计数）或 `messages`（消息计数）
+
+  **保留条件** 控制要保留多少上下文（准确指定一个）：
+
+  * `fraction` - 要保留的模型上下文大小的分数
+  * `tokens` - 要保留的绝对令牌数
+  * `messages` - 要保留的最近消息数
+
+  ```typescript  theme={null}
+  import { createAgent, summarizationMiddleware } from "langchain";
+
+  // 单个条件
+  const agent = createAgent({
+    model: "gpt-4.1",
+    tools: [weatherTool, calculatorTool],
+    middleware: [
+      summarizationMiddleware({
+        model: "gpt-4.1-mini",
+        trigger: { tokens: 4000, messages: 10 },
+        keep: { messages: 20 },
+      }),
+    ],
+  });
+
+  // 多个条件
+  const agent2 = createAgent({
+    model: "gpt-4.1",
+    tools: [weatherTool, calculatorTool],
+    middleware: [
+      summarizationMiddleware({
+        model: "gpt-4.1-mini",
+        trigger: [
+          { tokens: 3000, messages: 6 },
+        ],
+        keep: { messages: 20 },
+      }),
+    ],
+  });
+
+  // 使用分数限制
+  const agent3 = createAgent({
+    model: "gpt-4.1",
+    tools: [weatherTool, calculatorTool],
+    middleware: [
+      summarizationMiddleware({
+        model: "gpt-4.1-mini",
+        trigger: { fraction: 0.8 },
+        keep: { fraction: 0.3 },
+      }),
+    ],
+  });
+  ```
+</Accordion>
+
+### 人机交互 (Human-in-the-loop)
+
+在工具调用执行之前，暂停智能体执行以供人工批准、编辑或拒绝。[人机交互](/oss/javascript/langchain/human-in-the-loop) 对于以下情况很有用：
+
+* 需要人工批准的高风险操作（例如数据库写入、金融交易）。
+* 强制要求人工监督的合规工作流程。
+* 人工反馈指导智能体的长时间运行的对话。
+
+<Warning>
+  人机交互中间件需要一个 [checkpointer](/oss/javascript/langgraph/persistence#checkpoints) 来在中断期间维护状态。
+</Warning>
+
+```typescript  theme={null}
+import { createAgent, humanInTheLoopMiddleware } from "langchain";
+
+function readEmailTool(emailId: string): string {
+  /** 读取电子邮件的模拟函数。 */
+  return `Email content for ID: ${emailId}`;
+}
+
+function sendEmailTool(recipient: string, subject: string, body: string): string {
+  /** 发送电子邮件的模拟函数。 */
+  return `Email sent to ${recipient} with subject '${subject}'`;
+}
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [readEmailTool, sendEmailTool],
+  middleware: [
+    humanInTheLoopMiddleware({
+      interruptOn: {
+        sendEmailTool: {
+          allowedDecisions: ["approve", "edit", "reject"],
+        },
+        readEmailTool: false,
+      }
+    })
+  ]
+});
+```
+
+<Tip>
+  有关完整示例、配置选项和集成模式，请参阅 [人机交互文档](/oss/javascript/langchain/human-in-the-loop)。
+</Tip>
+
+<Callout icon="circle-play" iconType="solid">
+  观看此 [视频指南](https://www.youtube.com/watch?v=tdOeUVERukA) 演示人机交互中间件的行为。
+</Callout>
+
+### 模型调用限制 (Model call limit)
+
+限制模型调用次数以防止无限循环或成本过高。模型调用限制对于以下情况很有用：
+
+* 防止失控的智能体进行过多的 API 调用。
+* 在生产部署中实施成本控制。
+* 在特定调用预算内测试智能体行为。
+
+```typescript  theme={null}
+import { createAgent, modelCallLimitMiddleware } from "langchain";
+import { MemorySaver } from "@langchain/langgraph";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  checkpointer: new MemorySaver(), // 线程限制所需
+  tools: [],
+  middleware: [
+    modelCallLimitMiddleware({
+      threadLimit: 10,
+      runLimit: 5,
+      exitBehavior: "end",
+    }),
+  ],
+});
+```
+
+<Callout icon="circle-play" iconType="solid">
+  观看此 [视频指南](https://www.youtube.com/watch?v=x5jLQTFXR0Y) 演示模型调用限制中间件的行为。
+</Callout>
+
+<Accordion title="Configuration options">
+  <ParamField body="threadLimit" type="number">
+    线程中所有运行的最大模型调用次数。默认为无限制。
+  </ParamField>
+
+  <ParamField body="runLimit" type="number">
+    每次调用的最大模型调用次数。默认为无限制。
+  </ParamField>
+
+  <ParamField body="exitBehavior" type="string" default="end">
+    达到限制时的行为。选项：`'end'`（优雅终止）或 `'error'`（抛出异常）
+  </ParamField>
+</Accordion>
+
+### 工具调用限制 (Tool call limit)
+
+通过限制工具调用次数来控制智能体执行，可以是全局针对所有工具，也可以针对特定工具。工具调用限制对于以下情况很有用：
+
+* 防止过度调用昂贵的外部 API。
+* 限制网络搜索或数据库查询。
+* 对特定工具的使用实施速率限制。
+* 防止失控的智能体循环。
+
+```typescript  theme={null}
+import { createAgent, toolCallLimitMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [searchTool, databaseTool],
+  middleware: [
+    toolCallLimitMiddleware({ threadLimit: 20, runLimit: 10 }),
+    toolCallLimitMiddleware({
+      toolName: "search",
+      threadLimit: 5,
+      runLimit: 3,
+    }),
+  ],
+});
+```
+
+<Callout icon="circle-play" iconType="solid">
+  观看此 [视频指南](https://www.youtube.com/watch?v=oL6am5UqODY) 演示工具调用限制中间件的行为。
+</Callout>
+
+<Accordion title="Configuration options">
+  <ParamField body="toolName" type="string">
+    要限制的特定工具的名称。如果未提供，限制将应用于 **所有工具全局**。
+  </ParamField>
+
+  <ParamField body="threadLimit" type="number">
+    线程（对话）中所有运行的最大工具调用次数。在具有相同线程 ID 的多次调用中持久存在。需要检查点来维护状态。`undefined` 表示无线程限制。
+  </ParamField>
+
+  <ParamField body="runLimit" type="number">
+    每次调用（一个用户消息 → 响应周期）的最大工具调用次数。每次新用户消息都会重置。`undefined` 表示无运行限制。
+
+    **注意:** 必须至少指定 `threadLimit` 或 `runLimit` 之一。
+  </ParamField>
+
+  <ParamField body="exitBehavior" type="string" default="continue">
+    达到限制时的行为：
+
+    * `'continue'` (默认) - 使用错误消息阻止超出的工具调用，让其他工具和模型继续。模型根据错误消息决定何时结束。
+    * `'error'` - 抛出 `ToolCallLimitExceededError` 异常，立即停止执行。
+    * `'end'` - 立即停止执行，并针对超出的工具调用发出 ToolMessage 和 AI 消息。仅在限制单个工具时有效；如果其他工具有待处理的调用，则抛出错误。
+  </ParamField>
+</Accordion>
+
+<Accordion title="Full example">
+  指定限制：
+
+  * **Thread limit** - 对话中所有运行的最大调用次数（需要检查点）
+  * **Run limit** - 每次调用的最大调用次数（每轮重置）
+
+  退出行为：
+
+  * `'continue'` (默认) - 使用错误消息阻止超出的调用，智能体继续
+  * `'error'` - 立即引发异常
+  * `'end'` - 使用 ToolMessage + AI 消息停止（仅限单工具场景）
+
+  ```typescript  theme={null}
+  import { createAgent, toolCallLimitMiddleware } from "langchain";
+
+  const globalLimiter = toolCallLimitMiddleware({ threadLimit: 20, runLimit: 10 });
+  const searchLimiter = toolCallLimitMiddleware({ toolName: "search", threadLimit: 5, runLimit: 3 });
+  const databaseLimiter = toolCallLimitMiddleware({ toolName: "query_database", threadLimit: 10 });
+  const strictLimiter = toolCallLimitMiddleware({ toolName: "scrape_webpage", runLimit: 2, exitBehavior: "error" });
+
+  const agent = createAgent({
+    model: "gpt-4.1",
+    tools: [searchTool, databaseTool, scraperTool],
+    middleware: [globalLimiter, searchLimiter, databaseLimiter, strictLimiter],
+  });
+  ```
+</Accordion>
+
+### 模型回退 (Model fallback)
+
+当主模型失败时自动回退到替代模型。模型回退对于以下情况很有用：
+
+* 构建能够处理模型中断的弹性智能体。
+* 通过回退到更便宜的模型来优化成本。
+* 跨 OpenAI、Anthropic 等提供商的冗余。
+
+```typescript  theme={null}
+import { createAgent, modelFallbackMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [],
+  middleware: [
+    modelFallbackMiddleware(
+      "gpt-4.1-mini",
+      "claude-3-5-sonnet-20241022"
+    ),
+  ],
+});
+```
+
+<Accordion title="Configuration options">
+  中间件按顺序接受可变数量的字符串参数，代表回退模型：
+
+  <ParamField body="...models" type="string[]" required>
+    当主模型失败时按顺序尝试的一个或多个回退模型字符串
+
+    ```typescript  theme={null}
+    modelFallbackMiddleware(
+      "first-fallback-model",
+      "second-fallback-model",
+      // ... more models
+    )
+    ```
+  </ParamField>
+</Accordion>
+
+### PII 检测 (PII detection)
+
+使用可配置的策略检测并处理对话中的个人身份信息 (PII)。PII 检测对于以下情况很有用：
+
+* 具有合规要求的医疗保健和金融应用程序。
+* 需要清理日志的客户服务智能体。
+* 任何处理敏感用户数据的应用程序。
+
+```typescript  theme={null}
+import { createAgent, piiMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [],
+  middleware: [
+    piiMiddleware("email", { strategy: "redact", applyToInput: true }),
+    piiMiddleware("credit_card", { strategy: "mask", applyToInput: true }),
+  ],
+});
+```
+
+#### 自定义 PII 类型
+
+您可以通过提供 `detector` 参数来创建自定义 PII 类型。这允许您检测特定于您的用例的模式，而不仅仅是内置类型。
+
+**创建自定义检测器的三种方法：**
+
+1. **正则表达式字符串** - 简单的模式匹配
+
+2. **RegExp 对象** - 对正则表达式标志的更多控制
+
+3. **自定义函数** - 具有验证的复杂检测逻辑
+
+```typescript  theme={null}
+import { createAgent, piiMiddleware, type PIIMatch } from "langchain";
+
+// 方法 1: 正则表达式字符串
+const agent1 = createAgent({
+  model: "gpt-4.1",
+  tools: [],
+  middleware: [
+    piiMiddleware("api_key", {
+      detector: "sk-[a-zA-Z0-9]{32}",
+      strategy: "block",
+    }),
+  ],
+});
+
+// 方法 2: RegExp 对象
+const agent2 = createAgent({
+  model: "gpt-4.1",
+  tools: [],
+  middleware: [
+    piiMiddleware("phone_number", {
+      detector: /\+?\d{1,3}[\s.-]?\d{3,4}[\s.-]?\d{4}/,
+      strategy: "mask",
+    }),
+  ],
+});
+
+// 方法 3: 自定义检测器函数
+function detectSSN(content: string): PIIMatch[] {
+  const matches: PIIMatch[] = [];
+  const pattern = /\d{3}-\d{2}-\d{4}/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(content)) !== null) {
+    const ssn = match[0];
+    // 验证: 前 3 位不应为 000, 666, 或 900-999
+    const firstThree = parseInt(ssn.substring(0, 3), 10);
+    if (firstThree !== 0 && firstThree !== 666 && !(firstThree >= 900 && firstThree <= 999)) {
+      matches.push({
+        text: ssn,
+        start: match.index ?? 0,
+        end: (match.index ?? 0) + ssn.length,
+      });
+    }
+  }
+  return matches;
+}
+
+const agent3 = createAgent({
+  model: "gpt-4.1",
+  tools: [],
+  middleware: [
+    piiMiddleware("ssn", {
+      detector: detectSSN,
+      strategy: "hash",
+    }),
+  ],
+});
+```
+
+**自定义检测器函数签名：**
+
+检测器函数必须接受一个字符串（内容）并返回匹配项：
+
+返回 `PIIMatch` 对象数组：
+
+```typescript  theme={null}
+interface PIIMatch {
+  text: string;    // 匹配的文本
+  start: number;   // 内容中的起始索引
+  end: number;      // 内容中的结束索引
+}
+
+function detector(content: string): PIIMatch[] {
+  return [
+    { text: "matched_text", start: 0, end: 12 },
+    // ... 更多匹配
+  ];
+}
+```
+
+<Tip>
+  对于自定义检测器：
+
+  * 对简单的模式使用正则表达式字符串
+  * 当您需要标志（例如，不区分大小写的匹配）时使用 RegExp 对象
+  * 当您需要超出模式匹配的验证逻辑时使用自定义函数
+  * 自定义函数让您可以完全控制检测逻辑，并可以实施复杂的验证规则
+</Tip>
+
+<Accordion title="Configuration options">
+  <ParamField body="piiType" type="string" required>
+    要检测的 PII 类型。可以是内置类型（`email`, `credit_card`, `ip`, `mac_address`, `url`）或自定义类型名称。
+  </ParamField>
+
+  <ParamField body="strategy" type="string" default="redact">
+    如何处理检测到的 PII。选项：
+
+    * `'block'` - 检测到时抛出错误
+    * `'redact'` - 替换为 `[REDACTED_TYPE]`
+    * `'mask'` - 部分掩盖（例如，`****-****-****-1234`）
+    * `'hash'` - 替换为确定性哈希（例如，`<email_hash:a1b2c3d4>`）
+  </ParamField>
+
+  <ParamField body="detector" type="RegExp | string | function">
+    自定义检测器。可以是：
+
+    * `RegExp` - 用于匹配的正则模式
+    * `string` - 正则模式字符串（例如，`"sk-[a-zA-Z0-9]{32}"`）
+    * `function` - 自定义检测器函数 `(content: string) => PIIMatch[]`
+
+    如果未提供，则使用 PII 类型的内置检测器。
+  </ParamField>
+
+  <ParamField body="applyToInput" type="boolean" default="true">
+    在模型调用之前检查用户消息
+  </ParamField>
+
+  <ParamField body="applyToOutput" type="boolean" default="false">
+    在模型调用之后检查 AI 消息
+  </ParamField>
+
+  <ParamField body="applyToToolResults" type="boolean" default="false">
+    在执行之后检查工具结果消息
+  </ParamField>
+</Accordion>
+
+### 待办事项列表 (To-do list)
+
+为智能体配备任务规划和跟踪能力，以处理复杂的多步骤任务。待办事项列表对于以下情况很有用：
+
+* 需要跨多个工具进行协调的复杂多步骤任务。
+* 进度可见性很重要的长时间运行操作。
+
+<Note>
+  此中间件自动为智能体提供 `write_todos` 工具和系统提示，以指导有效的任务规划。
+</Note>
+
+```typescript  theme={null}
+import { createAgent, todoListMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [readFile, writeFile, runTests],
+  middleware: [todoListMiddleware()],
+});
+```
+
+<Callout icon="circle-play" iconType="solid">
+  观看此 [视频指南](https://www.youtube.com/watch?v=dwvhZ1z_Pas) 演示待办事项列表中间件的行为。
+</Callout>
+
+<Accordion title="Configuration options">
+  没有可用的配置选项（使用默认值）。
+</Accordion>
+
+### LLM 工具选择器 (LLM tool selector)
+
+在调用主模型之前，使用 LLM 智能地选择相关工具。LLM 工具选择器对于以下情况很有用：
+
+* 拥有许多工具（10+）的智能体，其中大多数与每个查询无关。
+* 通过过滤不相关的工具来减少令牌使用。
+* 提高模型焦点和准确性。
+
+此中间件使用结构化输出来询问 LLM 哪些工具与当前查询最相关。结构化输出模式定义了可用的工具名称和描述。模型提供商通常会在幕后将此结构化输出信息添加到系统提示中。
+
+```typescript  theme={null}
+import { createAgent, llmToolSelectorMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [tool1, tool2, tool3, tool4, tool5, ...],
+  middleware: [
+    llmToolSelectorMiddleware({
+      model: "gpt-4.1-mini",
+      maxTools: 3,
+      alwaysInclude: ["search"],
+    }),
+  ],
+});
+```
+
+<Accordion title="Configuration options">
+  <ParamField body="model" type="string | BaseChatModel">
+    用于工具选择的模型。可以是模型标识符字符串（例如 `'openai:gpt-4.1-mini'`）或 `BaseChatModel` 实例。默认为智能体的主模型。
+  </ParamField>
+
+  <ParamField body="systemPrompt" type="string">
+    选择模型的说明。如果未指定，则使用内置提示。
+  </ParamField>
+
+  <ParamField body="maxTools" type="number">
+    要选择的最大工具数。如果模型选择更多，则仅使用前 maxTools 个。如果未指定，则无限制。
+  </ParamField>
+
+  <ParamField body="alwaysInclude" type="string[]">
+    无论选择如何都始终包含的工具名称。这些不计入 maxTools 限制。
+  </ParamField>
+</Accordion>
+
+### 工具重试 (Tool retry)
+
+使用可配置的指数退避自动重试失败的工具调用。工具重试对于以下情况很有用：
+
+* 处理外部 API 调用中的瞬时故障。
+* 提高网络依赖型工具的可靠性。
+* 构建能够优雅地处理临时错误的弹性智能体。
+
+**API 参考:** [`toolRetryMiddleware`](https://reference.langchain.com/javascript/functions/langchain.index.toolRetryMiddleware.html)
+
+```typescript  theme={null}
+import { createAgent, toolRetryMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [searchTool, databaseTool],
+  middleware: [
+    toolRetryMiddleware({
+      maxRetries: 3,
+      backoffFactor: 2.0,
+      initialDelayMs: 1000,
+    }),
+  ],
+});
+```
+
+<Accordion title="Configuration options">
+  <ParamField body="maxRetries" type="number" default="2">
+    初始调用后的最大重试尝试次数（默认为 3 次总尝试）。必须 >= 0。
+  </ParamField>
+
+  <ParamField body="tools" type="(ClientTool | ServerTool | string)[]">
+    要应用重试逻辑的可选工具或工具名称数组。可以是 `BaseTool` 实例或工具名称字符串列表。如果为 `undefined`，则应用于所有工具。
+  </ParamField>
+
+  <ParamField body="retryOn" type="((error: Error) => boolean) | (new (...args: any[]) => Error)[]" default="() => true">
+    要重试的错误构造函数数组，或接受错误并在应重试时返回 `true` 的函数。默认为重试所有错误。
+  </ParamField>
+
+  <ParamField body="onFailure" type="'error' | 'continue' | ((error: Error) => string)" default="continue">
+    所有重试耗尽时的行为。选项：
+
+    * `'continue'` (默认) - 返回带有错误详细信息的 `ToolMessage`，允许 LLM 处理失败并可能恢复
+    * `'error'` - 重新引发异常，停止智能体执行
+    * 自定义函数 - 接受异常并返回 `ToolMessage` 内容字符串的函数，允许自定义错误格式
+
+    **已弃用的值:** `'raise'` (请改用 `'error'`) 和 `'return_message'` (请改用 `'continue'`)。这些已弃用的值仍然有效，但会显示警告。
+  </ParamField>
+
+  <ParamField body="backoffFactor" type="number" default="2.0">
+    指数退避的乘数。每次重试等待 `initialDelayMs * (backoffFactor ** retryNumber)` 毫秒。设置为 `0.0` 以实现恒定延迟。必须 >= 0。
+  </ParamField>
+
+  <ParamField body="initialDelayMs" type="number" default="1000">
+    第一次重试前的初始延迟（毫秒）。必须 >= 0。
+  </ParamField>
+
+  <ParamField body="maxDelayMs" type="number" default="60000">
+    重试之间的最大延迟（毫秒）（限制指数退避增长）。必须 >= 0。
+  </ParamField>
+
+  <ParamField body="jitter" type="boolean" default="true">
+    是否向延迟添加随机抖动 (`±25%`) 以避免惊群效应
+  </ParamField>
+</Accordion>
+
+<Accordion title="Full example">
+  中间件使用指数退避自动重试失败的工具调用。
+
+  **关键配置：**
+
+  * `maxRetries` - 重试尝试次数（默认：2）
+  * `backoffFactor` - 指数退避的乘数（默认：2.0）
+  * `initialDelayMs` - 起始延迟（毫秒）（默认：1000ms）
+  * `maxDelayMs` - 延迟增长上限（默认：60000ms）
+  * `jitter` - 添加随机变化（默认：true）
+
+  **失败处理：**
+
+  * `onFailure: "continue"` (默认) - 返回错误消息
+  * `onFailure: "error"` - 重新引发异常
+  * 自定义函数 - 返回错误消息的函数
+
+  ```typescript  theme={null}
+  import { createAgent, toolRetryMiddleware } from "langchain";
+  import { tool } from "@langchain/core/tools";
+  import { z } from "zod";
+
+  // 使用默认设置的基本用法（2 次重试，指数退避）
+  const agent = createAgent({
+    model: "gpt-4.1",
+    tools: [searchTool, databaseTool],
+    middleware: [toolRetryMiddleware()],
+  });
+
+  // 仅重试特定异常
+  const retry = toolRetryMiddleware({
+    maxRetries: 4,
+    retryOn: [TimeoutError, NetworkError],
+    backoffFactor: 1.5,
+  });
+
+  // 自定义异常过滤
+  function shouldRetry(error: Error): boolean {
+    // 仅在 5xx 错误时重试
+    if (error.name === "HTTPError" && "statusCode" in error) {
+      const statusCode = (error as any).statusCode;
+      return 500 <= statusCode && statusCode < 600;
+    }
+    return false;
+  }
+
+  const retryWithFilter = toolRetryMiddleware({
+    maxRetries: 3,
+    retryOn: shouldRetry,
+  });
+
+  // 使用自定义错误处理应用于特定工具
+  const formatError = (error: Error) =>
+    "Database temporarily unavailable. Please try again later.";
+
+  const retrySpecificTools = toolRetryMiddleware({
+    maxRetries: 4,
+    tools: ["search_database"],
+    onFailure: formatError,
+  });
+
+  // 使用 BaseTool 实例应用于特定工具
+  const searchDatabase = tool(
+    async ({ query }) => {
+      // 搜索实现
+      return results;
+    },
+    {
+      name: "search_database",
+      description: "Search the database",
+      schema: z.object({ query: z.string() }),
+    }
+  );
+
+  const retryWithToolInstance = toolRetryMiddleware({
+    maxRetries: 4,
+    tools: [searchDatabase], // 传递 BaseTool 实例
+  });
+
+  // 恒定退避（无指数增长）
+  const constantBackoff = toolRetryMiddleware({
+    maxRetries: 5,
+    backoffFactor: 0.0, // 无指数增长
+    initialDelayMs: 2000, // 总是等待 2 秒
+  });
+
+  // 失败时引发异常
+  const strictRetry = toolRetryMiddleware({
+    maxRetries: 2,
+    onFailure: "error", // 重新引发异常而不是返回消息
+  });
+  ```
+</Accordion>
+
+### 模型重试 (Model retry)
+
+使用可配置的指数退避自动重试失败的模型调用。模型重试对于以下情况很有用：
+
+* 处理模型 API 调用中的瞬时故障。
+* 提高网络依赖型模型请求的可靠性。
+* 构建能够优雅地处理临时模型错误的弹性智能体。
+
+**API 参考:** [`modelRetryMiddleware`](https://reference.langchain.com/javascript/functions/langchain.index.modelRetryMiddleware.html)
+
+```typescript  theme={null}
+import { createAgent, modelRetryMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [searchTool, databaseTool],
+  middleware: [
+    modelRetryMiddleware({
+      maxRetries: 3,
+      backoffFactor: 2.0,
+      initialDelayMs: 1000,
+    }),
+  ],
+});
+```
+
+<Accordion title="Configuration options">
+  <ParamField body="maxRetries" type="number" default="2">
+    初始调用后的最大重试尝试次数（默认为 3 次总尝试）。必须 >= 0。
+  </ParamField>
+
+  <ParamField body="retryOn" type="((error: Error) => boolean) | (new (...args: any[]) => Error)[]" default="() => true">
+    要重试的错误构造函数数组，或接受错误并在应重试时返回 `true` 的函数。默认为重试所有错误。
+  </ParamField>
+
+  <ParamField body="onFailure" type="'error' | 'continue' | ((error: Error) => string)" default="continue">
+    所有重试耗尽时的行为。选项：
+
+    * `'continue'` (默认) - 返回带有错误详细信息的 `AIMessage`，允许智能体可能优雅地处理失败
+    * `'error'` - 重新引发异常，停止智能体执行
+    * 自定义函数 - 接受异常并返回 `AIMessage` 内容字符串的函数，允许自定义错误格式
+  </ParamField>
+
+  <ParamField body="backoffFactor" type="number" default="2.0">
+    指数退避的乘数。每次重试等待 `initialDelayMs * (backoffFactor ** retryNumber)` 毫秒。设置为 `0.0` 以实现恒定延迟。必须 >= 0。
+  </ParamField>
+
+  <ParamField body="initialDelayMs" type="number" default="1000">
+    第一次重试前的初始延迟（毫秒）。必须 >= 0。
+  </ParamField>
+
+  <ParamField body="maxDelayMs" type="number" default="60000">
+    重试之间的最大延迟（毫秒）（限制指数退避增长）。必须 >= 0。
+  </ParamField>
+
+  <ParamField body="jitter" type="boolean" default="true">
+    是否向延迟添加随机抖动 (`±25%`) 以避免惊群效应
+  </ParamField>
+</Accordion>
+
+<Accordion title="Full example">
+  中间件使用指数退避自动重试失败的模型调用。
+
+  ```typescript  theme={null}
+  import { createAgent, modelRetryMiddleware } from "langchain";
+
+  // 使用默认设置的基本用法（2 次重试，指数退避）
+  const agent = createAgent({
+    model: "gpt-4.1",
+    tools: [searchTool],
+    middleware: [modelRetryMiddleware()],
+  });
+
+  class TimeoutError extends Error {
+      // ...
+  }
+  class NetworkError extends Error {
+      // ...
+  }
+
+  // 仅重试特定异常
+  const retry = modelRetryMiddleware({
+    maxRetries: 4,
+    retryOn: [TimeoutError, NetworkError],
+    backoffFactor: 1.5,
+  });
+
+  // 自定义异常过滤
+  function shouldRetry(error: Error): boolean {
+    // 仅在速率限制错误时重试
+    if (error.name === "RateLimitError") {
+      return true;
+    }
+    // 或者检查特定的 HTTP 状态代码
+    if (error.name === "HTTPError" && "statusCode" in error) {
+      const statusCode = (error as any).statusCode;
+      return statusCode === 429 || statusCode === 503;
+    }
+    return false;
+  }
+
+  const retryWithFilter = modelRetryMiddleware({
+    maxRetries: 3,
+    retryOn: shouldRetry,
+  });
+
+  // 返回错误消息而不是引发异常
+  const retryContinue = modelRetryMiddleware({
+    maxRetries: 4,
+    onFailure: "continue", // 返回带有错误的 AIMessage 而不是抛出
+  });
+
+  // 自定义错误消息格式
+  const formatError = (error: Error) =>
+    `Model call failed: ${error.message}. Please try again later.`;
+
+  const retryWithFormatter = modelRetryMiddleware({
+    maxRetries: 4,
+    onFailure: formatError,
+  });
+
+  // 恒定退避（无指数增长）
+  const constantBackoff = modelRetryMiddleware({
+    maxRetries: 5,
+    backoffFactor: 0.0, // 无指数增长
+    initialDelayMs: 2000, // 总是等待 2 秒
+  });
+
+  // 失败时引发异常
+  const strictRetry = modelRetryMiddleware({
+    maxRetries: 2,
+    onFailure: "error", // 重新引发异常而不是返回消息
+  });
+  ```
+</Accordion>
+
+### LLM 工具模拟器 (LLM tool emulator)
+
+为了测试目的，使用 LLM 模拟工具执行，用 AI 生成的响应替换实际工具调用。LLM 工具模拟器对于以下情况很有用：
+
+* 在不执行真实工具的情况下测试智能体行为。
+* 当外部工具不可用或昂贵时开发智能体。
+* 在实施实际工具之前对智能体工作流程进行原型设计。
+
+```typescript  theme={null}
+import { createAgent, toolEmulatorMiddleware } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [getWeather, searchDatabase, sendEmail],
+  middleware: [
+    toolEmulatorMiddleware(), // 模拟所有工具
+  ],
+});
+```
+
+<Accordion title="Configuration options">
+  <ParamField body="tools" type="(string | ClientTool | ServerTool)[]">
+    要模拟的工具名称（字符串）或工具实例的列表。如果为 `undefined`（默认），则将模拟 **所有** 工具。如果为空数组 `[]`，则不模拟任何工具。如果是带有工具名称/实例的数组，则仅模拟这些工具。
+  </ParamField>
+
+  <ParamField body="model" type="string | BaseChatModel">
+    用于生成模拟工具响应的模型。可以是模型标识符字符串（例如 `'anthropic:claude-sonnet-4-5-20250929'`）或 `BaseChatModel` 实例。如果未指定，默认为智能体的模型。
+  </ParamField>
+</Accordion>
+
+<Accordion title="Full example">
+  该中间件使用 LLM 为工具调用生成合理的响应，而不是执行实际工具。
+
+  ```typescript  theme={null}
+  import { createAgent, toolEmulatorMiddleware, tool } from "langchain";
+  import * as z from "zod";
+
+  const getWeather = tool(
+    async ({ location }) => `Weather in ${location}`,
+    {
+      name: "get_weather",
+      description: "Get the current weather for a location",
+      schema: z.object({ location: z.string() }),
+    }
+  );
+
+  const sendEmail = tool(
+    async ({ to, subject, body }) => "Email sent",
+    {
+      name: "send_email",
+      description: "Send an email",
+      schema: z.object({
+        to: z.string(),
+        subject: z.string(),
+        body: z.string(),
+      }),
+    }
+  );
+
+  // 模拟所有工具（默认行为）
+  const agent = createAgent({
+    model: "gpt-4.1",
+    tools: [getWeather, sendEmail],
+    middleware: [toolEmulatorMiddleware()],
+  });
+
+  // 按名称模拟特定工具
+  const agent2 = createAgent({
+    model: "gpt-4.1",
+    tools: [getWeather, sendEmail],
+    middleware: [
+      toolEmulatorMiddleware({
+        tools: ["get_weather"],
+      }),
+    ],
+  });
+
+  // 通过传递工具实例模拟特定工具
+  const agent3 = createAgent({
+    model: "gpt-4.1",
+    tools: [getWeather, sendEmail],
+    middleware: [
+      toolEmulatorMiddleware({
+        tools: [getWeather],
+      }),
+    ],
+  });
+
+  // 使用自定义模型进行模拟
+  const agent5 = createAgent({
+    model: "gpt-4.1",
+    tools: [getWeather, sendEmail],
+    middleware: [
+      toolEmulatorMiddleware({
+        model: "claude-sonnet-4-5-20250929",
+      }),
+    ],
+  });
+  ```
+</Accordion>
+
+### 上下文编辑 (Context editing)
+
+通过在达到令牌限制时清除较旧的工具调用输出，同时保留最近的结果来管理对话上下文。这有助于在具有许多工具调用的长对话中保持上下文窗口可管理。上下文编辑对于以下情况很有用：
+
+* 具有许多超过令牌限制的工具调用的长对话
+* 通过删除不再相关的旧工具输出来降低令牌成本
+* 仅在上下文中保留最近的 N 个工具结果
+
+```typescript  theme={null}
+import { createAgent, contextEditingMiddleware, ClearToolUsesEdit } from "langchain";
+
+const agent = createAgent({
+  model: "gpt-4.1",
+  tools: [],
+  middleware: [
+    contextEditingMiddleware({
+      edits: [
+        new ClearToolUsesEdit({
+          triggerTokens: 100000,
+          keep: 3,
+        }),
+      ],
+    }),
+  ],
+});
+```
+
+<Accordion title="Configuration options">
+  <ParamField body="edits" type="ContextEdit[]" default="[new ClearToolUsesEdit()]">
+    要应用的 [`ContextEdit`](https://reference.langchain.com/javascript/interfaces/langchain.index.ContextEdit.html) 策略数组
+  </ParamField>
+
+  **[`ClearToolUsesEdit`](https://reference.langchain.com/javascript/classes/langchain.index.ClearToolUsesEdit.html) 选项:**
+
+  <ParamField body="triggerTokens" type="number" default="100000">
+    触发编辑的令牌计数。当对话超过此令牌计数时，将清除较旧的工具输出。
+  </ParamField>
+
+  <ParamField body="clearAtLeast" type="number" default="0">
+    编辑运行时要回收的最小令牌数。如果设置为 0，则根据需要清除尽可能多的令牌。
+  </ParamField>
+
+  <ParamField body="keep" type="number" default="3">
+    必须保留的最近工具结果的数量。这些永远不会被清除。
+  </ParamField>
+
+  <ParamField body="clearToolInputs" type="boolean" default="false">
+    是否清除 AI 消息上的原始工具调用参数。当为 `true` 时，工具调用参数将替换为空对象。
+  </ParamField>
+
+  <ParamField body="excludeTools" type="string[]" default="[]">
+    要从清除中排除的工具名称列表。这些工具的输出永远不会被清除。
+  </ParamField>
+
+  <ParamField body="placeholder" type="string" default="[cleared]">
+    为清除的工具输出插入的占位符文本。这将替换原始工具消息内容。
+  </ParamField>
+</Accordion>
+
+<Accordion title="Full example">
+  中间件在达到令牌限制时应用上下文编辑策略。最常见的策略是 `ClearToolUsesEdit`，它清除较旧的工具结果，同时保留最近的结果。
+
+  **工作原理：**
+
+  1. 监控对话中的令牌计数
+  2. 当达到阈值时，清除较旧的工具输出
+  3. 保留最近的 N 个工具结果
+  4. 可选地保留工具调用参数以作为上下文
+
+  ```typescript  theme={null}
+  import { createAgent, contextEditingMiddleware, ClearToolUsesEdit } from "langchain";
+
+  const agent = createAgent({
+    model: "gpt-4.1",
+    tools: [searchTool, calculatorTool, databaseTool],
+    middleware: [
+      contextEditingMiddleware({
+        edits: [
+          new ClearToolUsesEdit({
+            triggerTokens: 2000,
+            keep: 3,
+            clearToolInputs: false,
+            excludeTools: [],
+            placeholder: "[cleared]",
+          }),
+        ],
+      }),
+    ],
+  });
+  ```
+</Accordion>
+
+### 文件系统中间件 (Filesystem middleware)
+
+上下文工程是构建有效智能体的主要挑战。当使用返回可变长度结果的工具（例如 `web_search` 和 RAG）时，这一点尤其困难，因为长的工具结果会迅速填满您的上下文窗口。
+
+来自 [deep agents](/oss/javascript/deepagents/overview) 的 `FilesystemMiddleware` 提供了四个用于与短期和长期记忆交互的工具：
+
+* `ls`: 列出文件系统中的文件
+* `read_file`: 读取整个文件或文件中的一定行数
+* `write_file`: 将新文件写入文件系统
+* `edit_file`: 编辑文件系统中的现有文件
+
+```typescript  theme={null}
+import { createAgent } from "langchain";
+import { createFilesystemMiddleware } from "deepagents";
+
+// FilesystemMiddleware 默认包含在 createDeepAgent 中
+// 如果构建自定义智能体，您可以自定义它
+const agent = createAgent({
+  model: "claude-sonnet-4-5-20250929",
+  middleware: [
+    createFilesystemMiddleware({
+      backend: undefined,  // 可选：自定义后端（默认为 StateBackend）
+      systemPrompt: "Write to the filesystem when...",  // 可选自定义系统提示覆盖
+      customToolDescriptions: {
+        ls: "Use the ls tool when...",
+        read_file: "Use the read_file tool to...",
+      },  // 可选：文件系统工具的自定义描述
+    }),
+  ],
+});
+```
+
+#### 短期与长期文件系统
+
+默认情况下，这些工具写入图状态中的本地“文件系统”。要启用跨线程的持久存储，请配置 `CompositeBackend`，将特定路径（如 `/memories/`）路由到 `StoreBackend`。
+
+```typescript  theme={null}
+import { createAgent } from "langchain";
+import { createFilesystemMiddleware, CompositeBackend, StateBackend, StoreBackend } from "deepagents";
+import { InMemoryStore } from "@langchain/langgraph-checkpoint";
+
+const store = new InMemoryStore();
+
+const agent = createAgent({
+  model: "claude-sonnet-4-5-20250929",
+  store,
+  middleware: [
+    createFilesystemMiddleware({
+      backend: (config) => new CompositeBackend(
+        new StateBackend(config),
+        { "/memories/": new StoreBackend(config) }
+      ),
+      systemPrompt: "Write to the filesystem when...", // 可选自定义系统提示覆盖
+      customToolDescriptions: {
+        ls: "Use the ls tool when...",
+        read_file: "Use the read_file tool to...",
+      }, // 可选：文件系统工具的自定义描述
+    }),
+  ],
+});
+```
+
+当您为 `/memories/` 配置带有 `StoreBackend` 的 `CompositeBackend` 时，任何以 **/memories/** 为前缀的文件都将保存到持久存储中，并在不同线程之间保留。没有此前缀的文件保留在临时状态存储中。
+
+### 子智能体 (Subagent)
+
+将任务移交给子智能体可以隔离上下文，保持主（监督）智能体的上下文窗口清洁，同时仍能深入执行任务。
+
+来自 [deep agents](/oss/javascript/deepagents/overview) 的子智能体中间件允许您通过 `task` 工具提供子智能体。
+
+```typescript  theme={null}
+import { tool } from "langchain";
+import { createAgent } from "langchain";
+import { createSubAgentMiddleware } from "deepagents";
+import { z } from "zod";
+
+const getWeather = tool(
+  async ({ city }: { city: string }) => {
+    return `The weather in ${city} is sunny.`;
+  },
+  {
+    name: "get_weather",
+    description: "Get the weather in a city.",
+    schema: z.object({
+      city: z.string(),
+    }),
+  },
+);
+
+const agent = createAgent({
+  model: "claude-sonnet-4-5-20250929",
+  middleware: [
+    createSubAgentMiddleware({
+      defaultModel: "claude-sonnet-4-5-20250929",
+      defaultTools: [],
+      subagents: [
+        {
+          name: "weather",
+          description: "This subagent can get weather in cities.",
+          systemPrompt: "Use the get_weather tool to get the weather in a city.",
+          tools: [getWeather],
+          model: "gpt-4.1",
+          middleware: [],
+        },
+      ],
+    }),
+  ],
+});
+```
+
+子智能体通过 **name**（名称）、**description**（描述）、**system prompt**（系统提示）和 **tools**（工具）来定义。您还可以为子智能体提供自定义 **model**（模型）或其他 **middleware**（中间件）。当您想给子智能体一个额外的状态键以与主智能体共享时，这特别有用。
+
+对于更复杂的用例，您还可以提供自己的预构建 LangGraph 图作为子智能体。
+
+```typescript  theme={null}
+import { tool, createAgent } from "langchain";
+import { createSubAgentMiddleware, type SubAgent } from "deepagents";
+import { z } from "zod";
+
+const getWeather = tool(
+  async ({ city }: { city: string }) => {
+    return `The weather in ${city} is sunny.`;
+  },
+  {
+    name: "get_weather",
+    description: "Get the weather in a city.",
+    schema: z.object({
+      city: z.string(),
+    }),
+  },
+);
+
+const weatherSubagent: SubAgent = {
+  name: "weather",
+  description: "This subagent can get weather in cities.",
+  systemPrompt: "Use the get_weather tool to get the weather in a city.",
+  tools: [getWeather],
+  model: "gpt-4.1",
+  middleware: [],
+};
+
+const agent = createAgent({
+  model: "claude-sonnet-4-5-20250929",
+  middleware: [
+    createSubAgentMiddleware({
+      defaultModel: "claude-sonnet-4-5-20250929",
+      defaultTools: [],
+      subagents: [weatherSubagent],
+    }),
+  ],
+});
+```
+
+除了任何用户定义的子智能体之外，主智能体还可以随时访问 `general-purpose`（通用）子智能体。此子智能体具有与主智能体相同的指令及其有权访问的所有工具。`general-purpose` 子智能体的主要目的是上下文隔离——主智能体可以将复杂任务委托给此子智能体，并获得简明的答案，而不会因中间工具调用而臃肿。
+
+## 提供商特定中间件
+
+这些中间件针对特定 LLM 提供商进行了优化。有关完整详细信息和示例，请参阅每个提供商的文档。
+
+<Columns cols={2}>
+  <Card title="Anthropic" href="/oss/javascript/integrations/middleware/anthropic" icon="anthropic" arrow>
+    Claude 模型的提示缓存、bash 工具、文本编辑器、内存和文件搜索中间件。
+  </Card>
+</Columns>
+
+***
+
+<Callout icon="pen-to-square" iconType="regular">
+  [在 GitHub 上编辑此页面](https://github.com/langchain-ai/docs/edit/main/src/oss/langchain/middleware/built-in.mdx) 或 [提交问题](https://github.com/langchain-ai/docs/issues/new/choose).
+</Callout>
+
+<Tip icon="terminal" iconType="regular">
+  [将这些文档连接](/use-these-docs) 到 Claude, VSCode, 以及更多通过 MCP 获取实时答案。
+</Tip>
