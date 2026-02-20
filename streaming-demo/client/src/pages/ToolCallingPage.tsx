@@ -1,9 +1,17 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useStream } from "@langchain/langgraph-sdk/react";
 import type { Message, ToolMessage } from "@langchain/langgraph-sdk";
-import type { ToolCallWithResult } from "@langchain/langgraph-sdk/react";
 import styles from "./ToolCallingPage.module.css";
+
+type ToolCallState = "pending" | "completed" | "error";
+
+interface ToolCallWithResult {
+  id: string;
+  call: { name: string; args: Record<string, unknown> };
+  result?: ToolMessage;
+  state: ToolCallState;
+}
 
 function parseToolResult(result?: ToolMessage): {
   status: string;
@@ -15,6 +23,78 @@ function parseToolResult(result?: ToolMessage): {
   } catch {
     return { status: "success", content: result.content as string };
   }
+}
+
+function inferToolNameFromContent(content: string): string {
+  try {
+    const parsed = JSON.parse(content);
+    const resultContent = parsed.content || "";
+    if (resultContent.includes("°C") || resultContent.includes("晴") || resultContent.includes("雨") || resultContent.includes("暂无数据")) {
+      return "get_weather";
+    }
+    if (resultContent.includes("=") && /\d+\s*[+\-*/]\s*\d+/.test(resultContent)) {
+      return "calculator";
+    }
+    if (resultContent.includes("搜索") && resultContent.includes("结果")) {
+      return "search";
+    }
+  } catch {}
+  return "tool";
+}
+
+function inferArgsFromContent(toolName: string, content: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(content);
+    const resultContent = parsed.content || "";
+    
+    if (toolName === "get_weather") {
+      const match = resultContent.match(/^([^:]+):/);
+      if (match) {
+        return { city: match[1].trim() };
+      }
+    }
+    
+    if (toolName === "calculator") {
+      const match = resultContent.match(/^([^=]+)\s*=/);
+      if (match) {
+        return { expression: match[1].trim() };
+      }
+    }
+    
+    if (toolName === "search") {
+      const match = resultContent.match(/搜索\s*"([^"]+)"/);
+      if (match) {
+        return { query: match[1] };
+      }
+    }
+  } catch {}
+  return {};
+}
+
+function extractToolCallsFromMessages(messages: Message[]): ToolCallWithResult[] {
+  const toolCallsMap = new Map<string, ToolCallWithResult>();
+  
+  for (const msg of messages) {
+    if (msg.type === "tool") {
+      const toolMsg = msg as ToolMessage;
+      const toolCallId = toolMsg.tool_call_id;
+      
+      if (toolCallId && !toolCallsMap.has(toolCallId)) {
+        const content = toolMsg.content as string;
+        const toolName = inferToolNameFromContent(content);
+        const args = inferArgsFromContent(toolName, content);
+        
+        toolCallsMap.set(toolCallId, {
+          id: toolCallId,
+          call: { name: toolName, args },
+          result: toolMsg,
+          state: toolMsg.status === "error" ? "error" : "completed",
+        });
+      }
+    }
+  }
+  
+  return Array.from(toolCallsMap.values());
 }
 
 function WeatherCard({ toolCall }: { toolCall: ToolCallWithResult }) {
@@ -76,6 +156,7 @@ function GenericToolCard({ toolCall }: { toolCall: ToolCallWithResult }) {
     search: "🔍",
     get_weather: "🌤️",
     calculator: "🔢",
+    tool: "🔧",
   };
 
   return (
@@ -132,6 +213,11 @@ export default function ToolCallingPage() {
     onThreadId: setThreadId,
   });
 
+  const toolCalls = useMemo(
+    () => extractToolCallsFromMessages(stream.messages),
+    [stream.messages]
+  );
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || stream.isLoading) return;
@@ -146,6 +232,8 @@ export default function ToolCallingPage() {
     setThreadId(null);
     stream.stop();
   };
+
+  const nonToolMessages = stream.messages.filter((m) => m.type !== "tool");
 
   return (
     <div className={styles.container}>
@@ -166,7 +254,7 @@ export default function ToolCallingPage() {
 
       <main className={styles.main}>
         <div className={styles.messages}>
-          {stream.messages.length === 0 && stream.toolCalls.length === 0 && (
+          {stream.messages.length === 0 && (
             <div className={styles.welcome}>
               <h2>👋 工具调用演示</h2>
               <p>这个演示展示如何渲染工具调用卡片，包括调用详情、结果和状态。</p>
@@ -181,29 +269,19 @@ export default function ToolCallingPage() {
             </div>
           )}
 
-          {stream.messages.map((message, idx) => {
-            if (message.type === "ai") {
-              const toolCalls = stream.getToolCalls(message);
+          {nonToolMessages.map((message, idx) => (
+            <MessageBubble key={message.id ?? idx} message={message} />
+          ))}
 
-              if (toolCalls.length > 0) {
-                return (
-                  <div key={message.id ?? idx} className={styles.toolCallsGroup}>
-                    {toolCalls.map((toolCall) => (
-                      <ToolCallCard key={toolCall.id} toolCall={toolCall} />
-                    ))}
-                  </div>
-                );
-              }
-            }
+          {toolCalls.length > 0 && (
+            <div className={styles.toolCallsGroup}>
+              {toolCalls.map((toolCall) => (
+                <ToolCallCard key={toolCall.id} toolCall={toolCall} />
+              ))}
+            </div>
+          )}
 
-            if (message.type === "tool") {
-              return null;
-            }
-
-            return <MessageBubble key={message.id ?? idx} message={message} />;
-          })}
-
-          {stream.isLoading && stream.toolCalls.length === 0 && (
+          {stream.isLoading && toolCalls.length === 0 && (
             <div className={styles.loading}>
               <div className={styles.loadingDot} />
               <div className={styles.loadingDot} />
