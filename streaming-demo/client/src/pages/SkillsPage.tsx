@@ -95,7 +95,7 @@ export default function SkillsPage() {
       if (!reader) throw new Error("No reader");
 
       let buffer = "";
-      const processedIds = new Set<string>();
+      let streamingMsgId: string | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -106,46 +106,72 @@ export default function SkillsPage() {
         buffer = lines.pop() || "";
 
         for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            continue;
+          }
           if (line.startsWith("data: ")) {
             try {
               const data = JSON.parse(line.slice(6));
 
+              if (data.id && data.type === "ai" && data.token === undefined && data.content === undefined) {
+                streamingMsgId = data.id;
+                setMessages((prev) => [...prev, {
+                  id: data.id,
+                  type: "ai",
+                  content: "",
+                }]);
+              }
+
+              if (data.token && streamingMsgId) {
+                setMessages((prev) => prev.map((msg) =>
+                  msg.id === streamingMsgId
+                    ? { ...msg, content: msg.content + data.token }
+                    : msg
+                ));
+              }
+
+              if (data.content !== undefined && data.tool_calls !== undefined && streamingMsgId) {
+                setMessages((prev) => prev.map((msg) =>
+                  msg.id === streamingMsgId
+                    ? { 
+                        ...msg, 
+                        content: data.content,
+                        toolCalls: data.tool_calls?.map((tc: { id: string; name: string; args: Record<string, unknown> }) => ({
+                          id: tc.id,
+                          name: tc.name,
+                          args: tc.args,
+                        })),
+                      }
+                    : msg
+                ));
+                streamingMsgId = null;
+              }
+
               if (Array.isArray(data) && data[0]) {
                 const msgData = data[0];
-                const msgId = msgData.id || `msg_${Date.now()}_${Math.random()}`;
-                
-                if (processedIds.has(msgId)) continue;
-                processedIds.add(msgId);
-
-                if (msgData.type === "ai") {
-                  const aiMsg: Message = {
-                    id: msgId,
-                    type: "ai",
-                    content: msgData.content || "",
-                    toolCalls: msgData.tool_calls,
-                  };
-                  
-                  if (aiMsg.content || (aiMsg.toolCalls && aiMsg.toolCalls.length > 0)) {
-                    setMessages((prev) => {
-                      const exists = prev.some((m) => m.id === aiMsg.id);
-                      if (exists) return prev;
-                      return [...prev, aiMsg];
-                    });
-                  }
-                } else if (msgData.type === "tool") {
-                  const toolMsg: Message = {
-                    id: msgId,
+                if (msgData.type === "tool") {
+                  setMessages((prev) => [...prev, {
+                    id: msgData.id || `tool_${Date.now()}`,
                     type: "tool",
                     content: msgData.content || "",
-                  };
-                  setMessages((prev) => {
-                    const exists = prev.some((m) => m.id === toolMsg.id);
-                    if (exists) return prev;
-                    return [...prev, toolMsg];
-                  });
+                  }]);
+                } else if (msgData.type === "ai" && msgData.tool_calls) {
+                  setMessages((prev) => [...prev, {
+                    id: msgData.id || `ai_${Date.now()}`,
+                    type: "ai",
+                    content: msgData.content || "",
+                    toolCalls: msgData.tool_calls?.map((tc: { id: string; name: string; args: Record<string, unknown> }) => ({
+                      id: tc.id,
+                      name: tc.name,
+                      args: tc.args,
+                    })),
+                  }]);
                 }
               }
 
+              if (data.agent?.currentSkill !== undefined) {
+                setCurrentSkill(data.agent.currentSkill);
+              }
               if (data.currentSkill !== undefined) {
                 setCurrentSkill(data.currentSkill);
               }

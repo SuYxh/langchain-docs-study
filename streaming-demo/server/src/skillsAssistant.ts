@@ -219,7 +219,8 @@ const systemPrompt = `你是一个智能助手，拥有动态加载技能(Skills
 
 async function routeMessage(state: SkillsAssistantStateType) {
   const lastMessage = state.messages[state.messages.length - 1];
-  if (lastMessage instanceof AIMessage && lastMessage.tool_calls && lastMessage.tool_calls.length > 0) {
+  const toolCalls = (lastMessage as AIMessage)?.tool_calls;
+  if (lastMessage && lastMessage._getType() === "ai" && toolCalls && toolCalls.length > 0) {
     return "tools";
   }
   return "__end__";

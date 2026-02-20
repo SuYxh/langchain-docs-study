@@ -792,38 +792,78 @@ app.post("/threads/:threadId/runs/stream/skills-assistant", async (req: Request,
   try {
     res.write(`event: metadata\ndata: ${JSON.stringify({ run_id: runId, thread_id: threadId })}\n\n`);
 
-    const stream = await skillsAssistantGraph.stream(input, {
+    const streamEvents = skillsAssistantGraph.streamEvents(input, {
       configurable: { thread_id: threadId },
-      streamMode: "updates",
+      version: "v2",
     });
 
-    for await (const update of stream) {
-      for (const [nodeName, nodeOutput] of Object.entries(update)) {
-        const output = nodeOutput as {
-          messages?: BaseMessage[];
-          currentStage?: string;
-          currentSkill?: string;
-          skillPrompt?: string;
-        };
+    let currentAiMsgId: string | null = null;
+    let currentContent = "";
 
-        if (output.messages && output.messages.length > 0) {
-          for (const msg of output.messages) {
-            const serialized = {
-              ...serializeStreamMessage(msg),
-              langgraph_node: nodeName,
-            };
-            res.write(`event: messages\ndata: ${JSON.stringify([serialized, {
-              langgraph_node: nodeName,
-            }])}\n\n`);
+    for await (const event of streamEvents) {
+      if (event.event === "on_chat_model_stream") {
+        const chunk = event.data?.chunk;
+        if (chunk?.content) {
+          const token = typeof chunk.content === "string" ? chunk.content : "";
+          if (token) {
+            if (!currentAiMsgId) {
+              currentAiMsgId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+              res.write(`event: stream_start\ndata: ${JSON.stringify({ 
+                id: currentAiMsgId,
+                type: "ai"
+              })}\n\n`);
+            }
+            currentContent += token;
+            res.write(`event: stream_token\ndata: ${JSON.stringify({ 
+              id: currentAiMsgId,
+              token 
+            })}\n\n`);
           }
         }
-
-        res.write(`event: updates\ndata: ${JSON.stringify({
-          [nodeName]: {
-            currentStage: output.currentStage,
-            currentSkill: output.currentSkill,
+      } else if (event.event === "on_chat_model_end") {
+        const output = event.data?.output;
+        if (output) {
+          const toolCalls = output.tool_calls || [];
+          if (currentAiMsgId) {
+            res.write(`event: stream_end\ndata: ${JSON.stringify({ 
+              id: currentAiMsgId,
+              type: "ai",
+              content: currentContent,
+              tool_calls: toolCalls,
+            })}\n\n`);
+          } else if (toolCalls.length > 0) {
+            const msgId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            res.write(`event: messages\ndata: ${JSON.stringify([{
+              id: msgId,
+              type: "ai",
+              content: "",
+              tool_calls: toolCalls,
+            }])}\n\n`);
           }
-        })}\n\n`);
+          currentAiMsgId = null;
+          currentContent = "";
+        }
+      } else if (event.event === "on_tool_end") {
+        const toolOutput = event.data?.output;
+        if (toolOutput) {
+          const toolMsgId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          res.write(`event: messages\ndata: ${JSON.stringify([{
+            id: toolMsgId,
+            type: "tool",
+            content: typeof toolOutput === "string" ? toolOutput : JSON.stringify(toolOutput),
+            name: event.name,
+          }])}\n\n`);
+        }
+      } else if (event.event === "on_chain_end" && event.name === "agent") {
+        const output = event.data?.output;
+        if (output?.currentSkill !== undefined) {
+          res.write(`event: updates\ndata: ${JSON.stringify({
+            agent: {
+              currentSkill: output.currentSkill,
+              currentStage: output.currentStage,
+            }
+          })}\n\n`);
+        }
       }
     }
 
