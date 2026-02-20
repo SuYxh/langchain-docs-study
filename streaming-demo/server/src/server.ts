@@ -3,7 +3,10 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import { agent } from "./agent.js";
 import { contentCreatorGraph } from "./contentCreator.js";
+import { sqlAssistantGraph, type SQLQuery, type HITLRequest, type HITLDecision } from "./sqlAssistant.js";
+import { skillsAssistantGraph, availableSkills } from "./skillsAssistant.js";
 import { AIMessage, HumanMessage, ToolMessage, BaseMessage } from "@langchain/core/messages";
+import { Command } from "@langchain/langgraph";
 
 const app = express();
 const PORT = 2024;
@@ -412,8 +415,466 @@ app.post("/threads/:threadId/runs/stream/content-creator", async (req: Request, 
   }
 });
 
+const sqlAssistantThreadStates = new Map<string, { 
+  messages: unknown[]; 
+  checkpoint: unknown;
+  generatedSQL?: SQLQuery;
+  hitlRequest?: HITLRequest;
+}>();
+
+app.get("/assistants/sql-assistant", (req, res) => {
+  res.json({
+    assistant_id: "sql-assistant",
+    name: "SQL Assistant with HITL",
+    graph_id: "sql-assistant",
+    config: {},
+    metadata: {},
+  });
+});
+
+app.get("/threads/:threadId/state/sql-assistant", async (req, res) => {
+  const { threadId } = req.params;
+  try {
+    const state = await sqlAssistantGraph.getState({ configurable: { thread_id: threadId } });
+    const stateValues = state.values as {
+      messages?: BaseMessage[];
+      generatedSQL?: SQLQuery;
+      hitlRequest?: HITLRequest;
+      currentStage?: string;
+      executionResult?: string;
+    };
+    
+    const checkpoint = {
+      checkpoint_id: `cp_${Date.now()}`,
+      thread_id: threadId,
+    };
+    
+    const hasInterrupt = state.tasks && state.tasks.length > 0 && 
+      state.tasks.some((task: { interrupts?: unknown[] }) => task.interrupts && task.interrupts.length > 0);
+    
+    res.json({
+      values: stateValues || { messages: [] },
+      next: state.next || [],
+      tasks: state.tasks || [],
+      metadata: {},
+      created_at: new Date().toISOString(),
+      checkpoint,
+      hasInterrupt,
+      generatedSQL: stateValues?.generatedSQL,
+      hitlRequest: stateValues?.hitlRequest,
+    });
+  } catch {
+    res.json({
+      values: { messages: [] },
+      next: [],
+      tasks: [],
+      metadata: {},
+      created_at: new Date().toISOString(),
+      checkpoint: { checkpoint_id: `cp_${Date.now()}`, thread_id: threadId },
+      hasInterrupt: false,
+    });
+  }
+});
+
+app.post("/threads/:threadId/runs/stream/sql-assistant", async (req: Request, res: Response) => {
+  let threadId = req.params.threadId;
+  if (!threadId || threadId === "undefined") {
+    threadId = `thread_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  const { input } = req.body;
+
+  console.log(`[${new Date().toISOString()}] SQL Assistant stream request:`, {
+    threadId,
+    input: JSON.stringify(input).slice(0, 100),
+  });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Content-Location", `/threads/${threadId}/runs/run_${Date.now()}`);
+  res.flushHeaders();
+
+  const runId = `run_${Date.now()}`;
+  const checkpointId = `cp_${Date.now()}`;
+
+  try {
+    res.write(`event: metadata\ndata: ${JSON.stringify({ run_id: runId, thread_id: threadId })}\n\n`);
+
+    const stream = await sqlAssistantGraph.stream(input, {
+      configurable: { thread_id: threadId },
+      streamMode: "updates",
+    });
+
+    for await (const update of stream) {
+      for (const [nodeName, nodeOutput] of Object.entries(update)) {
+        const output = nodeOutput as {
+          messages?: BaseMessage[];
+          currentStage?: string;
+          generatedSQL?: SQLQuery;
+          hitlRequest?: HITLRequest;
+          hitlDecision?: HITLDecision;
+          executionResult?: string;
+        };
+
+        if (output.messages && output.messages.length > 0) {
+          for (const msg of output.messages) {
+            const serialized = {
+              ...serializeStreamMessage(msg),
+              langgraph_node: nodeName,
+            };
+            res.write(`event: messages\ndata: ${JSON.stringify([serialized, {
+              langgraph_node: nodeName,
+            }])}\n\n`);
+          }
+        }
+
+        res.write(`event: updates\ndata: ${JSON.stringify({
+          [nodeName]: {
+            currentStage: output.currentStage,
+            generatedSQL: output.generatedSQL,
+            hitlRequest: output.hitlRequest,
+            executionResult: output.executionResult,
+          }
+        })}\n\n`);
+      }
+    }
+
+    const finalState = await sqlAssistantGraph.getState({ configurable: { thread_id: threadId } });
+    const stateValues = finalState.values as {
+      messages?: BaseMessage[];
+      currentStage?: string;
+      generatedSQL?: SQLQuery;
+      hitlRequest?: HITLRequest;
+      executionResult?: string;
+    };
+    
+    const messages = stateValues?.messages || [];
+    const serializedMessages = messages.map(serializeMessage);
+
+    const hasInterrupt = finalState.tasks && finalState.tasks.length > 0 && 
+      finalState.tasks.some((task: { interrupts?: unknown[] }) => task.interrupts && task.interrupts.length > 0);
+    
+    let interruptData = null;
+    if (hasInterrupt) {
+      for (const task of finalState.tasks as { interrupts?: { value: unknown }[] }[]) {
+        if (task.interrupts && task.interrupts.length > 0) {
+          interruptData = task.interrupts[0].value;
+          break;
+        }
+      }
+    }
+
+    const checkpoint = {
+      checkpoint_id: checkpointId,
+      thread_id: threadId,
+    };
+
+    sqlAssistantThreadStates.set(threadId, { 
+      messages: serializedMessages, 
+      checkpoint,
+      generatedSQL: stateValues?.generatedSQL || undefined,
+      hitlRequest: stateValues?.hitlRequest || undefined,
+    });
+
+    res.write(
+      `event: values\ndata: ${JSON.stringify({
+        messages: serializedMessages,
+        currentStage: stateValues?.currentStage,
+        generatedSQL: stateValues?.generatedSQL,
+        hitlRequest: stateValues?.hitlRequest,
+        executionResult: stateValues?.executionResult,
+        hasInterrupt,
+        interruptData,
+      })}\n\n`
+    );
+
+    res.write(`event: end\ndata: {}\n\n`);
+  } catch (error) {
+    console.error("SQL Assistant stream error:", error);
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        error: "StreamError",
+        message: error instanceof Error ? error.message : "Unknown error",
+      })}\n\n`
+    );
+  } finally {
+    res.end();
+  }
+});
+
+app.post("/threads/:threadId/runs/resume/sql-assistant", async (req: Request, res: Response) => {
+  const { threadId } = req.params;
+  const { decision } = req.body as { decision: HITLDecision };
+
+  console.log(`[${new Date().toISOString()}] SQL Assistant resume request:`, {
+    threadId,
+    decision,
+  });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  const runId = `run_${Date.now()}`;
+  const checkpointId = `cp_${Date.now()}`;
+
+  try {
+    res.write(`event: metadata\ndata: ${JSON.stringify({ run_id: runId, thread_id: threadId })}\n\n`);
+
+    const resumeCommand = new Command({ resume: decision });
+    
+    const stream = await sqlAssistantGraph.stream(resumeCommand, {
+      configurable: { thread_id: threadId },
+      streamMode: "updates",
+    });
+
+    for await (const update of stream) {
+      for (const [nodeName, nodeOutput] of Object.entries(update)) {
+        const output = nodeOutput as {
+          messages?: BaseMessage[];
+          currentStage?: string;
+          executionResult?: string;
+        };
+
+        if (output.messages && output.messages.length > 0) {
+          for (const msg of output.messages) {
+            const serialized = {
+              ...serializeStreamMessage(msg),
+              langgraph_node: nodeName,
+            };
+            res.write(`event: messages\ndata: ${JSON.stringify([serialized, {
+              langgraph_node: nodeName,
+            }])}\n\n`);
+          }
+        }
+
+        res.write(`event: updates\ndata: ${JSON.stringify({
+          [nodeName]: {
+            currentStage: output.currentStage,
+            executionResult: output.executionResult,
+          }
+        })}\n\n`);
+      }
+    }
+
+    const finalState = await sqlAssistantGraph.getState({ configurable: { thread_id: threadId } });
+    const stateValues = finalState.values as {
+      messages?: BaseMessage[];
+      currentStage?: string;
+      generatedSQL?: SQLQuery;
+      executionResult?: string;
+      isComplete?: boolean;
+    };
+    
+    const messages = stateValues?.messages || [];
+    const serializedMessages = messages.map(serializeMessage);
+
+    const checkpoint = {
+      checkpoint_id: checkpointId,
+      thread_id: threadId,
+    };
+
+    sqlAssistantThreadStates.set(threadId, { 
+      messages: serializedMessages, 
+      checkpoint,
+      generatedSQL: stateValues?.generatedSQL || undefined,
+    });
+
+    res.write(
+      `event: values\ndata: ${JSON.stringify({
+        messages: serializedMessages,
+        currentStage: stateValues?.currentStage,
+        generatedSQL: stateValues?.generatedSQL,
+        executionResult: stateValues?.executionResult,
+        isComplete: stateValues?.isComplete,
+        hasInterrupt: false,
+      })}\n\n`
+    );
+
+    res.write(`event: end\ndata: {}\n\n`);
+  } catch (error) {
+    console.error("SQL Assistant resume error:", error);
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        error: "ResumeError",
+        message: error instanceof Error ? error.message : "Unknown error",
+      })}\n\n`
+    );
+  } finally {
+    res.end();
+  }
+});
+
+const skillsAssistantThreadStates = new Map<string, { 
+  messages: unknown[]; 
+  checkpoint: unknown;
+  currentSkill?: string;
+}>();
+
+app.get("/assistants/skills-assistant", (req, res) => {
+  res.json({
+    assistant_id: "skills-assistant",
+    name: "Skills Assistant",
+    graph_id: "skills-assistant",
+    config: {},
+    metadata: {},
+  });
+});
+
+app.get("/skills/available", (req, res) => {
+  res.json(availableSkills);
+});
+
+app.get("/threads/:threadId/state/skills-assistant", async (req, res) => {
+  const { threadId } = req.params;
+  try {
+    const state = await skillsAssistantGraph.getState({ configurable: { thread_id: threadId } });
+    const stateValues = state.values as {
+      messages?: BaseMessage[];
+      currentSkill?: string;
+      skillPrompt?: string;
+      currentStage?: string;
+    };
+    
+    const checkpoint = {
+      checkpoint_id: `cp_${Date.now()}`,
+      thread_id: threadId,
+    };
+    
+    res.json({
+      values: stateValues || { messages: [] },
+      next: state.next || [],
+      tasks: state.tasks || [],
+      metadata: {},
+      created_at: new Date().toISOString(),
+      checkpoint,
+      currentSkill: stateValues?.currentSkill,
+    });
+  } catch {
+    res.json({
+      values: { messages: [] },
+      next: [],
+      tasks: [],
+      metadata: {},
+      created_at: new Date().toISOString(),
+      checkpoint: { checkpoint_id: `cp_${Date.now()}`, thread_id: threadId },
+    });
+  }
+});
+
+app.post("/threads/:threadId/runs/stream/skills-assistant", async (req: Request, res: Response) => {
+  let threadId = req.params.threadId;
+  if (!threadId || threadId === "undefined") {
+    threadId = `thread_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  const { input } = req.body;
+
+  console.log(`[${new Date().toISOString()}] Skills Assistant stream request:`, {
+    threadId,
+    input: JSON.stringify(input).slice(0, 100),
+  });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("Content-Location", `/threads/${threadId}/runs/run_${Date.now()}`);
+  res.flushHeaders();
+
+  const runId = `run_${Date.now()}`;
+  const checkpointId = `cp_${Date.now()}`;
+
+  try {
+    res.write(`event: metadata\ndata: ${JSON.stringify({ run_id: runId, thread_id: threadId })}\n\n`);
+
+    const stream = await skillsAssistantGraph.stream(input, {
+      configurable: { thread_id: threadId },
+      streamMode: "updates",
+    });
+
+    for await (const update of stream) {
+      for (const [nodeName, nodeOutput] of Object.entries(update)) {
+        const output = nodeOutput as {
+          messages?: BaseMessage[];
+          currentStage?: string;
+          currentSkill?: string;
+          skillPrompt?: string;
+        };
+
+        if (output.messages && output.messages.length > 0) {
+          for (const msg of output.messages) {
+            const serialized = {
+              ...serializeStreamMessage(msg),
+              langgraph_node: nodeName,
+            };
+            res.write(`event: messages\ndata: ${JSON.stringify([serialized, {
+              langgraph_node: nodeName,
+            }])}\n\n`);
+          }
+        }
+
+        res.write(`event: updates\ndata: ${JSON.stringify({
+          [nodeName]: {
+            currentStage: output.currentStage,
+            currentSkill: output.currentSkill,
+          }
+        })}\n\n`);
+      }
+    }
+
+    const finalState = await skillsAssistantGraph.getState({ configurable: { thread_id: threadId } });
+    const stateValues = finalState.values as {
+      messages?: BaseMessage[];
+      currentStage?: string;
+      currentSkill?: string;
+      skillPrompt?: string;
+    };
+    
+    const messages = stateValues?.messages || [];
+    const serializedMessages = messages.map(serializeMessage);
+
+    const checkpoint = {
+      checkpoint_id: checkpointId,
+      thread_id: threadId,
+    };
+
+    skillsAssistantThreadStates.set(threadId, { 
+      messages: serializedMessages, 
+      checkpoint,
+      currentSkill: stateValues?.currentSkill || undefined,
+    });
+
+    res.write(
+      `event: values\ndata: ${JSON.stringify({
+        messages: serializedMessages,
+        currentStage: stateValues?.currentStage,
+        currentSkill: stateValues?.currentSkill,
+      })}\n\n`
+    );
+
+    res.write(`event: end\ndata: {}\n\n`);
+  } catch (error) {
+    console.error("Skills Assistant stream error:", error);
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        error: "StreamError",
+        message: error instanceof Error ? error.message : "Unknown error",
+      })}\n\n`
+    );
+  } finally {
+    res.end();
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 LangGraph Server running at http://localhost:${PORT}`);
   console.log(`   Health check: http://localhost:${PORT}/health`);
-  console.log(`   Content Creator: http://localhost:${PORT}/threads/:threadId/runs/stream/content-creator\n`);
+  console.log(`   Content Creator: http://localhost:${PORT}/threads/:threadId/runs/stream/content-creator`);
+  console.log(`   SQL Assistant: http://localhost:${PORT}/threads/:threadId/runs/stream/sql-assistant`);
+  console.log(`   Skills Assistant: http://localhost:${PORT}/threads/:threadId/runs/stream/skills-assistant\n`);
 });

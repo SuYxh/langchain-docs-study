@@ -30,6 +30,13 @@ const demos = [
     title: "人机交互",
     description: "当代理需要人工批准才能执行工具时处理中断，实现批准、拒绝和编辑操作。",
   },
+  {
+    id: "skills",
+    path: "/skills",
+    icon: "🎯",
+    title: "动态技能加载",
+    description: "演示如何动态加载技能(Skills)，让 AI 助手根据用户问题自动选择并加载专业技能。",
+  },
 ];
 
 export default function HomePage() {
