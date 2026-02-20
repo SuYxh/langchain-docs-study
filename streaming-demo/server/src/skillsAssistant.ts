@@ -19,34 +19,106 @@ export interface SkillInfo {
   icon: string;
 }
 
-export const availableSkills: SkillInfo[] = [
-  {
-    name: "sql-expert",
-    displayName: "SQL 专家",
-    description: "帮助你编写、优化和调试 SQL 查询",
-    icon: "🗃️",
-  },
-  {
-    name: "code-reviewer",
-    displayName: "代码审查员",
-    description: "对代码进行全面的质量审查和改进建议",
-    icon: "🔍",
-  },
-  {
-    name: "doc-writer",
-    displayName: "文档撰写者",
-    description: "帮助撰写各类技术文档和说明",
-    icon: "📝",
-  },
-];
-
 const skillsDir = path.resolve(__dirname, "../../skills");
 
+interface SkillFrontmatter {
+  name: string;
+  description: string;
+  metadata?: {
+    author?: string;
+    version?: string;
+    icon?: string;
+    "display-name"?: string;
+  };
+}
+
+function parseSkillFile(content: string): { frontmatter: SkillFrontmatter; body: string } | null {
+  const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/;
+  const match = content.match(frontmatterRegex);
+  
+  if (!match) {
+    return null;
+  }
+
+  const yamlContent = match[1];
+  const body = match[2];
+
+  const frontmatter: SkillFrontmatter = {
+    name: "",
+    description: "",
+  };
+
+  const lines = yamlContent.split("\n");
+  let inMetadata = false;
+  const metadata: Record<string, string> = {};
+
+  for (const line of lines) {
+    if (line.startsWith("metadata:")) {
+      inMetadata = true;
+      continue;
+    }
+
+    if (inMetadata && line.startsWith("  ")) {
+      const metaMatch = line.match(/^\s+([^:]+):\s*"?([^"]*)"?$/);
+      if (metaMatch) {
+        metadata[metaMatch[1].trim()] = metaMatch[2].trim();
+      }
+    } else {
+      inMetadata = false;
+      const keyValueMatch = line.match(/^([^:]+):\s*(.*)$/);
+      if (keyValueMatch) {
+        const key = keyValueMatch[1].trim();
+        const value = keyValueMatch[2].trim().replace(/^["']|["']$/g, "");
+        if (key === "name") frontmatter.name = value;
+        if (key === "description") frontmatter.description = value;
+      }
+    }
+  }
+
+  frontmatter.metadata = metadata as SkillFrontmatter["metadata"];
+  return { frontmatter, body };
+}
+
+function discoverSkills(): SkillInfo[] {
+  const skills: SkillInfo[] = [];
+  
+  try {
+    const entries = fs.readdirSync(skillsDir, { withFileTypes: true });
+    
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const skillPath = path.join(skillsDir, entry.name, "SKILL.md");
+        if (fs.existsSync(skillPath)) {
+          const content = fs.readFileSync(skillPath, "utf-8");
+          const parsed = parseSkillFile(content);
+          
+          if (parsed) {
+            skills.push({
+              name: parsed.frontmatter.name,
+              displayName: parsed.frontmatter.metadata?.["display-name"] || parsed.frontmatter.name,
+              description: parsed.frontmatter.description,
+              icon: parsed.frontmatter.metadata?.icon || "📦",
+            });
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error discovering skills:", error);
+  }
+  
+  return skills;
+}
+
+export const availableSkills: SkillInfo[] = discoverSkills();
+
 function loadSkillContent(skillName: string): string | null {
-  const skillPath = path.join(skillsDir, `${skillName}.md`);
+  const skillPath = path.join(skillsDir, skillName, "SKILL.md");
   try {
     if (fs.existsSync(skillPath)) {
-      return fs.readFileSync(skillPath, "utf-8");
+      const content = fs.readFileSync(skillPath, "utf-8");
+      const parsed = parseSkillFile(content);
+      return parsed ? parsed.body : content;
     }
     return null;
   } catch (error) {
